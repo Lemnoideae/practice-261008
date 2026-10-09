@@ -38,3 +38,12 @@ out/
 
 ### Kotlin ###
 .kotlin
+
+### AI ###
+AGENT.md
+AGENTS.md
+GEMINI.md
+.agents/
+
+### envFile ###
+.env
