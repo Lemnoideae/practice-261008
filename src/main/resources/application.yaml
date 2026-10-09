@@ -1,3 +1,5 @@
 spring:
   application:
     name: practice-261008
+  profiles:
+    default: local
