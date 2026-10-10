@@ -2,17 +2,28 @@ package com.programmers.be14.practice_261008.wisesaying.controller
 
 import com.programmers.be14.practice_261008.wisesaying.entity.WiseSaying
 import com.programmers.be14.practice_261008.wisesaying.repository.WiseSayingRepository
+import com.programmers.be14.practice_261008.wisesaying.service.WiseSayingService
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.ExtendWith
+import org.mockito.Mockito
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.test.system.CapturedOutput
+import org.springframework.boot.test.system.OutputCaptureExtension
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.http.MediaType
 import org.springframework.test.context.ActiveProfiles
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean
 import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.header
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 import org.springframework.transaction.annotation.Transactional
@@ -21,10 +32,14 @@ import org.springframework.transaction.annotation.Transactional
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
 @Transactional
+@ExtendWith(OutputCaptureExtension::class)
 class WiseSayingControllerTests @Autowired constructor(
     private val mockMvc: MockMvc,
     private val wiseSayingRepository: WiseSayingRepository
 ) {
+
+    @MockitoSpyBean
+    private lateinit var wiseSayingService: WiseSayingService
 
     @Test
     @DisplayName("A04: 정상 JSON POST 요청 시 200 OK와 생성된 데이터가 반환된다")
@@ -397,5 +412,209 @@ class WiseSayingControllerTests @Autowired constructor(
         val refreshed = wiseSayingRepository.findById(existing.id!!).orElseThrow()
         assertEquals(validContent, refreshed.content)
         assertEquals(validAuthor, refreshed.author)
+    }
+
+    @Test
+    @DisplayName("A11: 비숫자 ID 경로 변수로 요청 시 400 Bad Request와 공통 오류 구조를 반환한다")
+    fun requestWithNonNumericIdReturnsBadRequest() {
+        mockMvc.perform(get("/api/v1/wisesaying/not-a-number"))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.status").value(400))
+            .andExpect(jsonPath("$.error").value("Bad Request"))
+            .andExpect(jsonPath("$.message").value("요청 파라미터 또는 경로 변수의 타입이 올바르지 않습니다."))
+
+        mockMvc.perform(
+            patch("/api/v1/wisesaying/abc")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"content": "내용"}""")
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.status").value(400))
+            .andExpect(jsonPath("$.error").value("Bad Request"))
+
+        mockMvc.perform(delete("/api/v1/wisesaying/invalid-id"))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.status").value(400))
+            .andExpect(jsonPath("$.error").value("Bad Request"))
+    }
+
+    @Test
+    @DisplayName("A11: 문법이 잘못된 malformed JSON 요청 시 400 Bad Request를 반환하고 내부 예외를 노출하지 않는다")
+    fun requestWithMalformedJsonReturnsBadRequest() {
+        val malformedBodies = listOf(
+            """{"content": "내용", "author": }""",
+            """{"content": "닫히지 않은 문자열""",
+            """{not-a-json}"""
+        )
+
+        for (body in malformedBodies) {
+            mockMvc.perform(
+                post("/api/v1/wisesaying")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(body)
+            )
+                .andExpect(status().isBadRequest)
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Bad Request"))
+                .andExpect(jsonPath("$.message").value("요청 본문 형식이 올바르지 않거나 필수 필드가 누락되었습니다."))
+        }
+    }
+
+    @Test
+    @DisplayName("A08: 생성 시 필수 필드가 누락되거나 null인 경우 400 Bad Request를 반환하고 레코드가 생성되지 않는다")
+    fun createWithMissingOrNullRequiredFields() {
+        val initialCount = wiseSayingRepository.count()
+
+        val invalidBodies = listOf(
+            """{"content": "내용만 있고 작가 누락"}""",
+            """{"author": "작가만 있고 내용 누락"}""",
+            """{"content": "내용", "author": null}""",
+            """{"content": null, "author": "작가"}""",
+            """{"content": null, "author": null}""",
+            """{}"""
+        )
+
+        for (body in invalidBodies) {
+            mockMvc.perform(
+                post("/api/v1/wisesaying")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(body)
+            )
+                .andExpect(status().isBadRequest)
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Bad Request"))
+        }
+
+        assertEquals(initialCount, wiseSayingRepository.count())
+    }
+
+    @Test
+    @DisplayName("A07, A12: 존재하지 않는 ID에 대한 GET, PATCH 및 빈 PATCH 요청 시 404 Not Found와 공통 오류 구조를 반환한다")
+    fun requestWithNonExistentIdReturnsNotFound() {
+        val nonExistentId = 999999L
+
+        mockMvc.perform(get("/api/v1/wisesaying/$nonExistentId"))
+            .andExpect(status().isNotFound)
+            .andExpect(jsonPath("$.timestamp").isNotEmpty)
+            .andExpect(jsonPath("$.status").value(404))
+            .andExpect(jsonPath("$.error").value("Not Found"))
+            .andExpect(jsonPath("$.message").value("해당 ID의 명언은 존재하지 않습니다."))
+
+        mockMvc.perform(
+            patch("/api/v1/wisesaying/$nonExistentId")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"content": "새 내용", "author": "새 작가"}""")
+        )
+            .andExpect(status().isNotFound)
+            .andExpect(jsonPath("$.status").value(404))
+            .andExpect(jsonPath("$.error").value("Not Found"))
+            .andExpect(jsonPath("$.message").value("해당 ID의 명언은 존재하지 않습니다."))
+
+        mockMvc.perform(
+            patch("/api/v1/wisesaying/$nonExistentId")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}")
+        )
+            .andExpect(status().isNotFound)
+            .andExpect(jsonPath("$.status").value(404))
+            .andExpect(jsonPath("$.error").value("Not Found"))
+            .andExpect(jsonPath("$.message").value("해당 ID의 명언은 존재하지 않습니다."))
+
+        mockMvc.perform(
+            patch("/api/v1/wisesaying/$nonExistentId")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"content": null, "author": null}""")
+        )
+            .andExpect(status().isNotFound)
+            .andExpect(jsonPath("$.status").value(404))
+            .andExpect(jsonPath("$.error").value("Not Found"))
+            .andExpect(jsonPath("$.message").value("해당 ID의 명언은 존재하지 않습니다."))
+    }
+
+    @Test
+    @DisplayName("U3-R1: 매핑되지 않은 URL(오타 경로, 누락된 하위 경로) 요청 시 404 Not Found와 공통 오류 구조를 반환하고 ERROR 로그를 남기지 않는다")
+    fun unmappedUrlsReturnNotFoundWithoutErrorLog(output: CapturedOutput) {
+        val unmappedPaths = listOf(
+            "/api/v1/wisesayings",
+            "/api/v1/wisesaying/1/missing"
+        )
+        for (path in unmappedPaths) {
+            mockMvc.perform(get(path))
+                .andExpect(status().isNotFound)
+                .andExpect(jsonPath("$.timestamp").isNotEmpty)
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("Not Found"))
+                .andExpect(jsonPath("$.message").value("요청한 리소스를 찾을 수 없습니다."))
+        }
+
+        assertFalse(
+            output.all.contains("서버 내부 오류 발생"),
+            "매핑되지 않은 URL 요청은 서버 내부 오류(ERROR)로 기록되지 않아야 합니다."
+        )
+    }
+
+    @Test
+    @DisplayName("A13: 지원하지 않는 HTTP 메서드(PUT) 요청 시 405 Method Not Allowed와 Allow 헤더를 반환한다")
+    fun unsupportedMethodReturnsMethodNotAllowedWithAllowHeader() {
+        mockMvc.perform(
+            put("/api/v1/wisesaying/1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"content": "내용", "author": "작가"}""")
+        )
+            .andExpect(status().isMethodNotAllowed)
+            .andExpect(header().exists("Allow"))
+            .andExpect(jsonPath("$.status").value(405))
+            .andExpect(jsonPath("$.error").value("Method Not Allowed"))
+            .andExpect(jsonPath("$.message").value("지원하지 않는 HTTP 메서드입니다."))
+
+        mockMvc.perform(put("/api/v1/wisesaying"))
+            .andExpect(status().isMethodNotAllowed)
+            .andExpect(header().exists("Allow"))
+            .andExpect(jsonPath("$.status").value(405))
+            .andExpect(jsonPath("$.error").value("Method Not Allowed"))
+            .andExpect(jsonPath("$.message").value("지원하지 않는 HTTP 메서드입니다."))
+    }
+
+    @Test
+    @DisplayName("A13: 지원하지 않는 Content-Type(text/plain) 요청 시 415 Unsupported Media Type을 반환한다")
+    fun unsupportedContentTypeReturnsUnsupportedMediaType() {
+        mockMvc.perform(
+            post("/api/v1/wisesaying")
+                .contentType(MediaType.TEXT_PLAIN)
+                .content("content=hello&author=world")
+        )
+            .andExpect(status().isUnsupportedMediaType)
+            .andExpect(jsonPath("$.status").value(415))
+            .andExpect(jsonPath("$.error").value("Unsupported Media Type"))
+            .andExpect(jsonPath("$.message").value("지원하지 않는 미디어 타입입니다."))
+    }
+
+    @Test
+    @DisplayName("A14: 예상치 못한 서버 내부 예외 발생 시 500과 일반 메시지를 반환하고 내부 예외 정보는 노출하지 않는다")
+    fun unexpectedExceptionReturnsInternalServerErrorWithSafeMessage() {
+        val secretErrorMessage = "치명적 DB 연결 실패: SECRET_DB_PASSWORD_1234"
+        Mockito.doThrow(RuntimeException(secretErrorMessage))
+            .`when`(wiseSayingService).findAll()
+
+        try {
+            val result = mockMvc.perform(get("/api/v1/wisesaying"))
+                .andExpect(status().isInternalServerError)
+                .andExpect(jsonPath("$.status").value(500))
+                .andExpect(jsonPath("$.error").value("Internal Server Error"))
+                .andExpect(jsonPath("$.message").value("서버 내부 오류가 발생했습니다."))
+                .andReturn()
+
+            val responseBody = result.response.contentAsString
+            assertFalse(
+                responseBody.contains(secretErrorMessage),
+                "내부 예외 메시지가 클라이언트에 노출되어서는 안 됩니다."
+            )
+            assertFalse(
+                responseBody.contains("RuntimeException"),
+                "예외 클래스 이름이 클라이언트에 노출되어서는 안 됩니다."
+            )
+        } finally {
+            Mockito.reset(wiseSayingService)
+        }
     }
 }

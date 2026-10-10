@@ -41,7 +41,7 @@ class WiseSayingService(
 			EntityNotFoundException("해당 ID의 명언은 존재하지 않습니다.")
 		}
 		founded.update(request.content, request.author)
-		return repository.save(founded)
+		return repository.saveAndFlush(founded)
 	}
 	
 	@Transactional
